@@ -62,9 +62,16 @@ export class MarketData extends EventEmitter {
 export const marketData = new MarketData();
 
 export async function getCandles(symbol: MarketSymbol, interval = "1m", limit = 120): Promise<Candle[]> {
-  const url = new URL("https://api.binance.com/api/v3/klines");
-  url.searchParams.set("symbol", symbol); url.searchParams.set("interval", interval); url.searchParams.set("limit", String(limit));
-  const response = await fetch(url); if (!response.ok) throw new Error("Binance candle request failed");
-  const rows = await response.json() as unknown[][];
-  return rows.map(r => ({ symbol, time: Number(r[0]), open: Number(r[1]), high: Number(r[2]), low: Number(r[3]), close: Number(r[4]), volume: Number(r[5]), closed: true }));
+  const hosts = ["https://data-api.binance.vision", "https://api.binance.com"];
+  for (const host of hosts) {
+    const url = new URL("/api/v3/klines", host);
+    url.searchParams.set("symbol", symbol); url.searchParams.set("interval", interval); url.searchParams.set("limit", String(limit));
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+      if (!response.ok) continue;
+      const rows = await response.json() as unknown[][];
+      return rows.map(r => ({ symbol, time: Number(r[0]), open: Number(r[1]), high: Number(r[2]), low: Number(r[3]), close: Number(r[4]), volume: Number(r[5]), closed: true }));
+    } catch { /* Try the next Binance public market-data host. */ }
+  }
+  throw new Error("Binance candle request failed");
 }
