@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "npm ci && npm run db:generate && npm run build -w @kraftbase/shared && npm run build -w @kraftbase/api"
+buildCommand = "npm install --include=dev && npm run db:generate && npm run build -w @kraftbase/shared && npm run build -w @kraftbase/api"
 [deploy]
 startCommand = "npm run db:deploy -w @kraftbase/api && npm run start -w @kraftbase/api"
 healthcheckPath = "/health"
