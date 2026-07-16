@@ -4,8 +4,20 @@ Kraft/Trade is a full-stack cryptocurrency paper-trading platform. It relays liv
 
 > **Paper trading only.** The application does not use Binance account APIs, exchange API keys, embedded wallets, deposits, withdrawals, or real asset custody.
 
+## Live deployment
+
+| Component | Production URL |
+|---|---|
+| Web application | [https://kraft-trade-web.vercel.app](https://kraft-trade-web.vercel.app) |
+| REST and Socket.IO API | [https://krafttrade-production.up.railway.app](https://krafttrade-production.up.railway.app) |
+| Liveness | [https://krafttrade-production.up.railway.app/health](https://krafttrade-production.up.railway.app/health) |
+| Database readiness | [https://krafttrade-production.up.railway.app/ready](https://krafttrade-production.up.railway.app/ready) |
+
+Vercel hosts the React application. Railway hosts the persistent API, Socket.IO relay, and PostgreSQL database.
+
 ## Contents
 
+- [Live deployment](#live-deployment)
 - [Features](#features)
 - [Technology](#technology)
 - [Architecture](#architecture)
@@ -79,14 +91,14 @@ flowchart LR
 - **React web app:** renders market data, validates basic form input, requests trades, and merges REST and Socket.IO updates by immutable IDs.
 - **Express API:** authenticates requests, owns wallet and order state, validates all trading rules, and returns authoritative portfolio data.
 - **Socket.IO server:** authenticates each connection, relays live market events, and pushes order and portfolio changes.
-- **Binance relay:** maintains a shared upstream connection, subscribes and unsubscribes to supported streams, caches the latest execution quote, and reconnects with exponential backoff.
+- **Binance relay:** maintains one shared upstream connection, subscribes and unsubscribes to supported streams, caches the latest execution quote, and reconnects with exponential backoff. It prefers the assignment endpoint at `wss://stream.binance.com:9443/ws` and falls back to Binance's market-data-only stream when the hosting region cannot reach the primary endpoint.
 - **PostgreSQL:** stores users, wallets, holdings, orders, and immutable trades.
 - **Privy:** owns login credentials and verifies user email addresses. The application stores the Privy DID, verified email, and chosen display name; it never stores passwords.
 
 ### Market-data flow
 
 1. The browser establishes an authenticated Socket.IO connection.
-2. The browser subscribes to supported markets.
+2. After the authenticated socket connects, the browser subscribes to all supported markets. Subscriptions are repeated after every reconnect.
 3. The API reference-counts subscriptions and sends Binance `SUBSCRIBE` or `UNSUBSCRIBE` messages.
 4. Binance ticker, partial-depth, and kline frames are parsed into shared application types.
 5. Ticker prices are cached server-side and broadcast to connected clients.
@@ -245,7 +257,7 @@ Demo mode uses a local synthetic identity and must never be enabled in productio
 | `PRIVY_APP_ID` | Yes in production | `demo-app` | Privy application identifier. |
 | `PRIVY_APP_SECRET` | Yes in production | `demo-secret` | Server-only credential used by the Privy SDK. |
 | `PRIVY_VERIFICATION_KEY` | No | — | Optional local JWT verification key. |
-| `WEB_ORIGIN` | Yes | `http://localhost:5173` | Comma-separated CORS allowlist for browser origins. |
+| `WEB_ORIGIN` | Yes | `http://localhost:5173` | Comma-separated CORS allowlist. Use origins only, with no path or trailing slash. |
 | `PORT` | No | `4000` | HTTP and Socket.IO listening port. |
 | `STARTING_BALANCE` | No | `10000` | Initial paper USDT balance for new users. |
 | `ALLOW_DEMO_AUTH` | No | `false` | Enables the local `demo-token` bypass. Never enable in production. |
@@ -443,7 +455,7 @@ Public endpoint returning supported symbols.
 
 #### `GET /api/v1/markets/:symbol/candles?limit=120`
 
-Public proxy for Binance one-minute klines. `limit` is clamped between 20 and 500.
+Public proxy for Binance one-minute klines. `limit` is clamped between 20 and 500. The API prefers `https://data-api.binance.vision` and falls back to `https://api.binance.com`, avoiding regional failures without requiring a Binance API key.
 
 ```json
 {
@@ -760,32 +772,34 @@ The GitHub Actions workflow installs dependencies, generates Prisma, runs type c
 
 ## Deployment
 
+The repository is an npm workspace monorepo. Production services must install dependencies from the repository root so `@kraftbase/shared` is available to both applications.
+
 ### API and PostgreSQL on Railway
 
 1. Create a Railway project from the repository.
 2. Add a Railway PostgreSQL service.
 3. Add an API service using the repository root.
-4. Railway will use `railway.toml` to install dependencies, generate Prisma, build shared and API packages, deploy migrations, and start the server.
+4. Set the Railway config file path to `/railway.toml`. Railway uses it to install dependencies, generate Prisma, build the shared and API packages, deploy migrations, and start the server.
 5. Set:
    - `DATABASE_URL` from Railway PostgreSQL
    - `PRIVY_APP_ID`
    - `PRIVY_APP_SECRET`
-   - `WEB_ORIGIN` to the final Vercel origin
+   - `WEB_ORIGIN=https://kraft-trade-web.vercel.app`
    - `ALLOW_DEMO_AUTH=false`
 6. Confirm `/health` and `/ready` return `200`.
 
-The API requires a persistent process because it maintains Binance and Socket.IO connections. Do not deploy it as a short-lived serverless function.
+Do not include a trailing slash in `WEB_ORIGIN`: browser `Origin` headers do not include one, and CORS matching is exact. The API requires a persistent process because it maintains Binance and Socket.IO connections; do not deploy it as a short-lived serverless function.
 
 ### Web application on Vercel
 
 1. Import the same repository into Vercel.
-2. Set the root directory to `apps/web`.
+2. Set the root directory to `apps/web`. Its build script compiles `@kraftbase/shared` before TypeScript and Vite so the workspace-only Vercel build resolves shared declarations.
 3. Set:
-   - `VITE_API_URL=https://<railway-api-domain>`
+   - `VITE_API_URL=https://krafttrade-production.up.railway.app`
    - `VITE_PRIVY_APP_ID=<privy-app-id>`
    - `VITE_DEMO_MODE=false`
 4. Build and deploy.
-5. Update API `WEB_ORIGIN` with the exact Vercel origin.
+5. Update API `WEB_ORIGIN` with the exact Vercel origin, without a trailing slash, and redeploy the API.
 6. Add the Vercel origin to Privy's allowed origins.
 
 ### Production smoke test
@@ -840,10 +854,31 @@ The Privy account must have a verified email-linked account. Enable email or Goo
 
 ### Prices remain in `Connecting`
 
-- Check API logs for Binance connection errors.
-- Confirm the machine or hosting region can reach `wss://stream.binance.com:9443/ws`.
-- Binance market data may be restricted in some regions.
-- Confirm the API is deployed as a persistent service and supports WebSocket traffic.
+- Confirm the browser can reach the Railway Socket.IO endpoint and that `WEB_ORIGIN` exactly matches the browser origin.
+- Confirm the Privy token is current; Socket.IO authenticates its handshake separately from REST requests.
+- Check API logs for Binance connection errors and confirm the service is persistent and supports WebSocket traffic.
+- The relay tries `wss://stream.binance.com:9443/ws` first, then `wss://data-stream.binance.vision/ws` when the primary endpoint is unavailable in the hosting region.
+
+### Status says `Markets live`, but cards remain in `Syncing`
+
+The Socket.IO connection and Binance upstream are open, but no ticker subscription has produced data. Use a frontend version that emits `market:subscribe` from the socket `connect` callback, then hard-refresh the page. This ensures subscriptions are sent on the initial connection and every reconnect.
+
+### Candle endpoint returns `500`
+
+Test the public proxy directly:
+
+```bash
+curl -i 'https://krafttrade-production.up.railway.app/api/v1/markets/BTCUSDT/candles?limit=20' \
+  -H 'Origin: https://kraft-trade-web.vercel.app'
+```
+
+A healthy response is `200` with candle JSON and `access-control-allow-origin: https://kraft-trade-web.vercel.app`. The server uses Binance's market-data host first and the primary REST API as fallback.
+
+### Browser reports a CORS error
+
+- Set `WEB_ORIGIN` to the exact scheme and host, for example `https://kraft-trade-web.vercel.app`.
+- Do not append `/` and do not include a page path.
+- Apply the Railway variable change and wait for the replacement deployment to become `Online`.
 
 ### Orders return `503`
 
