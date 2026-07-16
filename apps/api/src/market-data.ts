@@ -2,9 +2,13 @@ import WebSocket from "ws";
 import { EventEmitter } from "node:events";
 import { MARKETS, type Candle, type Depth, type MarketSymbol, type Ticker } from "@kraftbase/shared";
 
-const BINANCE_WS = "wss://stream.binance.com:9443/ws";
+const BINANCE_WS_ENDPOINTS = [
+  "wss://stream.binance.com:9443/ws",
+  "wss://data-stream.binance.vision/ws",
+] as const;
 export class MarketData extends EventEmitter {
   private ws?: WebSocket; private requestId = 0; private reconnects = 0; private stopped = false;
+  private endpointIndex = 0;
   private recycle?: NodeJS.Timeout; private reconnectTimer?: NodeJS.Timeout;
   private refs = new Map<MarketSymbol, number>();
   private quotes = new Map<MarketSymbol, { price: string; updatedAt: number }>();
@@ -23,7 +27,7 @@ export class MarketData extends EventEmitter {
   }
   private connect() {
     if (this.stopped) return;
-    this.ws = new WebSocket(BINANCE_WS);
+    this.ws = new WebSocket(BINANCE_WS_ENDPOINTS[this.endpointIndex]!);
     this.ws.on("open", () => {
       this.reconnects = 0; this.emit("status", { connected: true, message: "Live market connected" });
       this.ws?.send(JSON.stringify({ method: "SET_PROPERTY", params: ["combined", true], id: ++this.requestId }));
@@ -32,7 +36,7 @@ export class MarketData extends EventEmitter {
     });
     this.ws.on("message", raw => this.parse(raw.toString()));
     this.ws.on("error", () => this.emit("status", { connected: false, message: "Market connection interrupted" }));
-    this.ws.on("close", () => { if (!this.stopped) this.scheduleReconnect(); });
+    this.ws.on("close", () => { if (!this.stopped) { this.endpointIndex = (this.endpointIndex + 1) % BINANCE_WS_ENDPOINTS.length; this.scheduleReconnect(); } });
     this.ws.on("ping", data => this.ws?.pong(data));
   }
   private scheduleReconnect() {
