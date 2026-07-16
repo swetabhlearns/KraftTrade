@@ -1,0 +1,89 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+
+enum OrderSide {
+  BUY
+  SELL
+}
+enum OrderStatus {
+  PENDING
+  EXECUTED
+  REJECTED
+  CANCELED
+}
+enum OrderType {
+  MARKET
+  LIMIT
+  STOP_LOSS
+}
+
+model User {
+  id String @id @default(cuid())
+  privyDid String @unique
+  email String?
+  displayName String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  wallet Wallet?
+  holdings Holding[]
+  orders Order[]
+  trades Trade[]
+}
+model Wallet {
+  id String @id @default(cuid())
+  userId String @unique
+  cashBalance Decimal @default(10000) @db.Decimal(24, 8)
+  version Int @default(0)
+  updatedAt DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+model Holding {
+  id String @id @default(cuid())
+  userId String
+  asset String
+  quantity Decimal @default(0) @db.Decimal(24, 8)
+  averageCost Decimal @default(0) @db.Decimal(24, 8)
+  updatedAt DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, asset])
+}
+model Order {
+  id String @id @default(cuid())
+  userId String
+  clientOrderId String
+  symbol String
+  side OrderSide
+  type OrderType @default(MARKET)
+  quantity Decimal @db.Decimal(24, 8)
+  triggerPrice Decimal? @db.Decimal(24, 8)
+  executionPrice Decimal? @db.Decimal(24, 8)
+  quoteAmount Decimal? @db.Decimal(24, 8)
+  status OrderStatus
+  rejectionReason String?
+  createdAt DateTime @default(now())
+  executedAt DateTime?
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trade Trade?
+  @@unique([userId, clientOrderId])
+  @@index([userId, createdAt])
+  @@index([symbol, status])
+}
+model Trade {
+  id String @id @default(cuid())
+  orderId String @unique
+  userId String
+  symbol String
+  side OrderSide
+  quantity Decimal @db.Decimal(24, 8)
+  price Decimal @db.Decimal(24, 8)
+  quoteAmount Decimal @db.Decimal(24, 8)
+  executedAt DateTime @default(now())
+  order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, executedAt])
+}

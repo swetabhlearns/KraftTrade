@@ -1,0 +1,6 @@
+{
+  "name": "@kraftbase/web", "version": "1.0.0", "private": true, "type": "module",
+  "scripts": { "dev": "vite", "build": "tsc -b && vite build", "typecheck": "tsc -b --pretty false", "test": "vitest run" },
+  "dependencies": { "@kraftbase/shared": "*", "@privy-io/react-auth": "^3.35.1", "lucide-react": "^0.475.0", "react": "^19.0.0", "react-dom": "^19.0.0", "react-hot-toast": "^2.5.2", "socket.io-client": "^4.8.1" },
+  "devDependencies": { "@types/react": "^19.0.8", "@types/react-dom": "^19.0.3", "@vitejs/plugin-react": "^4.3.4", "typescript": "^5.7.3", "vite": "^6.1.0", "vitest": "^3.0.5" }
+}

@@ -1,0 +1,50 @@
+import http from "node:http";
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { pinoHttp } from "pino-http";
+import { Server } from "socket.io";
+import { MARKETS, conditionalOrderSchema, marketOrderSchema, profileSchema, type MarketSymbol, type SocketClientEvents, type SocketServerEvents } from "@kraftbase/shared";
+import { auth, type AuthRequest, verifyToken } from "./auth.js";
+import { config } from "./config.js";
+import { prisma } from "./db.js";
+import { getCandles, marketData } from "./market-data.js";
+import { cancelOrder, createConditionalOrder, executeMarketOrder, leaderboard, portfolio, processTriggeredOrders, toOrder, toTrade } from "./trading.js";
+
+const app = express(); const server = http.createServer(app);
+const origins = config.WEB_ORIGIN.split(",").map(v => v.trim());
+app.set("trust proxy", 1); app.use(helmet()); app.use(cors({ origin: origins, credentials: true }));
+app.use(express.json({ limit: "32kb" })); app.use(pinoHttp({ redact: ["req.headers.authorization"] }));
+app.use("/api", rateLimit({ windowMs: 60_000, limit: 180, standardHeaders: "draft-7", legacyHeaders: false }));
+app.get("/health", (_req, res) => res.json({ status: "ok" }));
+app.get("/ready", async (_req, res) => { try { await prisma.$queryRaw`SELECT 1`; res.json({ status: "ready" }); } catch { res.status(503).json({ status: "not_ready" }); } });
+app.get("/api/v1/markets", (_req, res) => res.json({ markets: MARKETS }));
+app.get("/api/v1/markets/:symbol/candles", async (req, res, next) => { try { const symbol = req.params.symbol as MarketSymbol; if (!MARKETS.includes(symbol)) return res.status(404).json({ error: "Unsupported market" }); const limit = Math.min(500, Math.max(20, Number(req.query.limit) || 120)); res.json({ candles: await getCandles(symbol, "1m", limit) }); } catch (e) { next(e); } });
+app.use("/api/v1", auth);
+app.get("/api/v1/me", (req: AuthRequest, res) => res.json({ user: { id: req.user!.id, name: req.user!.displayName, email: req.user!.email, profileComplete: Boolean(req.user!.displayName && req.user!.email) } }));
+app.post("/api/v1/me/profile", async (req: AuthRequest, res, next) => { try { const { name } = profileSchema.parse(req.body); if (!req.user!.email) return res.status(422).json({ error: "No verified email is linked to this Privy account" }); const user = await prisma.user.update({ where: { id: req.user!.id }, data: { displayName: name } }); res.json({ user: { id: user.id, name: user.displayName, email: user.email, profileComplete: true } }); } catch (e) { next(e); } });
+app.get("/api/v1/wallet", async (req: AuthRequest, res) => res.json((await portfolio(req.user!.id)).wallet));
+app.get("/api/v1/holdings", async (req: AuthRequest, res) => res.json({ holdings: (await portfolio(req.user!.id)).holdings }));
+app.get("/api/v1/trades", async (req: AuthRequest, res) => { const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25)); const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined; const rows = await prisma.trade.findMany({ where: { userId: req.user!.id }, orderBy: { executedAt: "desc" }, take: limit + 1, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}) }); const hasMore = rows.length > limit; const page = rows.slice(0, limit); res.json({ trades: page.map(toTrade), nextCursor: hasMore ? page.at(-1)?.id : null }); });
+app.get("/api/v1/orders", async (req: AuthRequest, res) => { const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25)); const rows = await prisma.order.findMany({ where: { userId: req.user!.id }, orderBy: { createdAt: "desc" }, take: limit }); res.json({ orders: rows.map(toOrder) }); });
+app.get("/api/v1/leaderboard", async (req: AuthRequest, res) => res.json({ entries: await leaderboard(req.user!.id) }));
+const orderLimiter = rateLimit({ windowMs: 60_000, limit: 30 });
+app.post("/api/v1/orders/market", orderLimiter, async (req: AuthRequest, res, next) => { try { const input = marketOrderSchema.parse(req.body); const result = await executeMarketOrder(req.user!.id, input); io.to(`user:${req.user!.id}`).emit("order:executed", { trade: result.trade!, portfolio: result.portfolio }); io.to(`user:${req.user!.id}`).emit("portfolio:updated", result.portfolio); res.status(result.duplicate ? 200 : 201).json(result); } catch (e) { next(e); } });
+app.post("/api/v1/orders/conditional", orderLimiter, async (req: AuthRequest, res, next) => { try { const result = await createConditionalOrder(req.user!.id, conditionalOrderSchema.parse(req.body)); io.to(`user:${req.user!.id}`).emit("order:updated", { order: result.order, message: "Conditional order placed" }); res.status(result.duplicate ? 200 : 201).json(result); } catch (e) { next(e); } });
+app.delete("/api/v1/orders/:id", orderLimiter, async (req: AuthRequest, res, next) => { try { const order = await cancelOrder(req.user!.id, String(req.params.id)); io.to(`user:${req.user!.id}`).emit("order:updated", { order, message: "Order canceled" }); res.json({ order }); } catch (e) { next(e); } });
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => { const e = err as { status?: number; message?: string; issues?: unknown }; res.status(e.status ?? (e.issues ? 400 : 500)).json({ error: e.message ?? "Unexpected server error", details: e.issues }); });
+
+const io = new Server<SocketClientEvents, SocketServerEvents>(server, { cors: { origin: origins, credentials: true }, transports: ["websocket", "polling"] });
+io.use(async (socket, next) => { try { const claims = await verifyToken(socket.handshake.auth.token); const user = await prisma.user.upsert({ where: { privyDid: claims.userId }, update: {}, create: { privyDid: claims.userId, wallet: { create: { cashBalance: config.STARTING_BALANCE } } } }); socket.data.userId = user.id; next(); } catch { next(new Error("Unauthorized")); } });
+io.on("connection", socket => {
+  socket.join(`user:${socket.data.userId}`); const active = new Set<MarketSymbol>();
+  socket.on("market:subscribe", ({ symbol }) => { if (!MARKETS.includes(symbol) || active.has(symbol)) return; active.add(symbol); marketData.subscribe(symbol); });
+  socket.on("market:unsubscribe", ({ symbol }) => { if (active.delete(symbol)) marketData.unsubscribe(symbol); });
+  socket.on("disconnect", () => { active.forEach(symbol => marketData.unsubscribe(symbol)); });
+});
+marketData.on("ticker", async data => { io.emit("market:ticker", data); try { const results = await processTriggeredOrders(data.symbol, data.price); for (const result of results) { io.to(`user:${result.userId}`).emit("order:updated", { order: result.order, message: result.trade ? `${result.order.type.replace("_", "-")} order executed` : result.order.rejectionReason ?? "Order rejected" }); if (result.trade && result.portfolio) { io.to(`user:${result.userId}`).emit("order:executed", { trade: result.trade, portfolio: result.portfolio }); io.to(`user:${result.userId}`).emit("portfolio:updated", result.portfolio); } } } catch (error) { console.error("Conditional order processing failed", error); } }); marketData.on("depth", data => io.emit("market:depth", data));
+marketData.on("candle", data => io.emit("market:candle", data)); marketData.on("status", data => io.emit("market:status", data)); marketData.start();
+server.listen(config.PORT, () => console.log(`API listening on :${config.PORT}`));
+async function shutdown() { marketData.stop(); io.close(); server.close(); await prisma.$disconnect(); process.exit(0); }
+process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);
